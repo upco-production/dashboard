@@ -9817,7 +9817,7 @@ if(typeof renderDowntime === 'function'){
 // OPERATIONAL GOOGLE SHEETS CONNECTOR + DEBUG LOG
 // =============================================================
 const ERP_SHEET_CONFIG = {
-  APP_SCRIPT_URL: 'https://script.google.com/macros/s/AKfycbxeLyxLK1I9wc022j5JU6pjrd9G360lC9Sd1jCWm5Plkh0qy2u99jO8b8D-RyjgRkMORw/exec',
+  APP_SCRIPT_URL: 'https://upco-dashboard.netlify.app/.netlify/functions/proxy',
   SOURCES: {
     PRODUCTION_MASTER: {department:'PRODUCTION_MASTER', sourceSheetName:'UP_PRODUCTION_MASTER', sourceSheetId:'1v3ueUtYiuA5VNDmP3vsF5sH0fxyzIgZNfETGzt-eZ4s', sourceTabName:'ALL_MASTER_TABS', masterSheetName:'UP_PRODUCTION_MASTER', masterTabName:'ALL', syncMode:'READ_WRITE', owner:'MAIN_ADMIN', status:'ACTIVE'},
     SYSTEM_MASTER: {department:'SYSTEM_MASTER', sourceSheetName:'UP_SYSTEM_MASTER', sourceSheetId:'1_wS3PPXn2YM8hlKQipPhrH1ere4s2wvda-1ETAG1fFM', sourceTabName:'SYSTEM_TABS', masterSheetName:'UP_SYSTEM_MASTER', masterTabName:'SYSTEM_TABS', syncMode:'ADMIN_ONLY', owner:'MAIN_ADMIN', status:'ACTIVE'},
@@ -15053,13 +15053,10 @@ async function apiGet(action,extra){
 async function apiPost(action,body){
   const sheetId=getMaintSheetId();
   if(!sheetId) throw new Error('Maintenance Sheet ID not configured in Settings');
+  // Apps Script doPost reads action from payload.action (body), not URL params.
+  // We put action+sheetId BOTH in URL params AND in the body so either pattern works.
   const merged=Object.assign({action,sheetId},body||{});
-  const url=APP.settings.appScriptUrl || ERP_SHEET_CONFIG.APP_SCRIPT_URL;
-  // No Content-Type header — avoids CORS preflight which Google Apps Script cannot handle
-  const r=await fetch(url,{method:'POST',body:JSON.stringify(merged)});
-  const text=await r.text();
-  if(!r.ok) throw new Error('HTTP '+r.status+' '+text.slice(0,160));
-  try{return JSON.parse(text);}catch(e){throw new Error('Invalid JSON: '+text.slice(0,160));}
+  return erpApi({action,sheetId},merged);
 }
 async function syncFromSheets(){
   try{
