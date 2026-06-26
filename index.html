@@ -14848,7 +14848,8 @@ function isTech(){
   if(typeof window.isTechnicalTeam==='function'&&window.isTechnicalTeam()) return true;
   // Fallback: check role directly on APP.currentUser
   const r=String(APP?.currentUser?.role||'').trim().toUpperCase();
-  return /^TECH_(MECHANICAL|ELECTRICAL|UTILITIES)$/.test(r);
+  return /^TECH_(MECHANICAL|ELECTRICAL|UTILITIES)$/.test(r) ||
+         /^(MECH_INCHARGE|ELEC_INCHARGE|UTIL_INCHARGE|TECH_MANAGER|TECH_UTILITY)$/.test(r);
 }
 function curRole(){ return String(APP?.currentUser?.role||'').trim().toUpperCase(); }
 function curName(){
@@ -14998,9 +14999,9 @@ const TYPE_CODE={
 // ── Role → type code (for queue matching) ────────────────────────────────
 function roleToTypeCode(role){
   const r=String(role||'').toUpperCase();
-  if(r==='TECH_MECHANICAL'||r==='MECHANICAL') return 'ME';
-  if(r==='TECH_ELECTRICAL'||r==='ELECTRICAL') return 'EE';
-  if(r==='TECH_UTILITIES'||r==='UTILITIES')   return 'UT';
+  if(r==='TECH_MECHANICAL'||r==='MECHANICAL'||r==='MECH_INCHARGE'||r==='TECH_MANAGER') return 'ME';
+  if(r==='TECH_ELECTRICAL'||r==='ELECTRICAL'||r==='ELEC_INCHARGE') return 'EE';
+  if(r==='TECH_UTILITIES'||r==='UTILITIES'||r==='UTIL_INCHARGE'||r==='TECH_UTILITY') return 'UT';
   return null;
 }
 // ── Generate notification number: TYPE/DEPT/YY/MM/SEQ ────────────────────
