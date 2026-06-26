@@ -768,6 +768,9 @@ tr:hover td{background:rgba(255,255,255,.02)}
             <div onclick="window.openChangePassword()" style="padding:10px 14px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;transition:background .15s" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
               🔑 Change Password
             </div>
+            <div onclick="window._bellEnablePush && window._bellEnablePush()" style="padding:10px 14px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;color:var(--cyan);transition:background .15s" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'" id="user-menu-push-btn">
+              🔔 Enable Push Notifications
+            </div>
             <div onclick="window.doLogout()" style="padding:10px 14px;font-size:12px;cursor:pointer;display:flex;align-items:center;gap:8px;color:var(--red);transition:background .15s;border-top:1px solid var(--border)" onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='transparent'">
               🚪 Logout
             </div>
@@ -20210,11 +20213,16 @@ window._bellEnablePush = async function(){
   var _origToggle = window.toggleMaintNotifPanel;
   window.toggleMaintNotifPanel = function(){
     if(typeof _origToggle === 'function') _origToggle.apply(this, arguments);
-    var bar = document.getElementById('bell-push-enable-bar');
-    if(bar){
-      var granted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
-      bar.style.display = granted ? 'none' : 'block';
-    }
+    setTimeout(function(){
+      var bar = document.getElementById('bell-push-enable-bar');
+      if(bar){
+        var granted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
+        var panel = document.getElementById('maint-notif-panel');
+        if(panel && panel.style.display !== 'none'){
+          bar.style.display = granted ? 'none' : 'block';
+        }
+      }
+    }, 10);
   };
 })();
 </script>
