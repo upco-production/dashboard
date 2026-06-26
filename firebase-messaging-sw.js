@@ -8,7 +8,9 @@
 // This handles BACKGROUND push notifications when the ERP tab
 // is closed or in the background.
 // ============================================================
-
+// Service Worker scope fix for subdirectory hosting
+self.addEventListener('install', function(e) { e.waitUntil(self.skipWaiting()); });
+self.addEventListener('activate', function(e) { e.waitUntil(self.clients.claim()); });
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
 importScripts('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
 
