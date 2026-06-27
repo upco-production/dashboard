@@ -20620,7 +20620,7 @@ function doLoginCompare(storedInSheet, inputFromUser){
 // ── Get Apps Script URL from any available source ────────────────────────────
 function getScriptUrl(){
   try{ var ls = localStorage.getItem('up_appScriptUrl'); if(ls && ls.includes('script.google')) return ls; }catch(e){}
-  try{ if(getAPP() && APP.settings && APP.settings.appScriptUrl && APP.settings.appScriptUrl.includes('script.google')) return APP.settings.appScriptUrl; }catch(e){}
+  try{ var _sa=getAPP(); if(_sa&&_sa.settings&&_sa.settings.appScriptUrl&&_sa.settings.appScriptUrl.includes('script.google')) return _sa.settings.appScriptUrl.trim(); }catch(e){}
   try{ if(window.ERP_SHEET_CONFIG && ERP_SHEET_CONFIG.APP_SCRIPT_URL) return ERP_SHEET_CONFIG.APP_SCRIPT_URL; }catch(e){}
   return '';
 }
@@ -20731,126 +20731,134 @@ function applyPostLoginUI(user){
 
 // ── THE MASTER doLogin ────────────────────────────────────────────────────────
 window.doLogin = async function(){
-  var uEl    = document.getElementById('login-user');
-  var pEl    = document.getElementById('login-pass');
-  var errEl  = document.getElementById('login-error');
-  var btnEl  = document.querySelector('.login-btn');
+  var uEl   = document.getElementById('login-user');
+  var pEl   = document.getElementById('login-pass');
+  var errEl = document.getElementById('login-error');
+  var btnEl = document.querySelector('.login-btn');
 
-  // Self-contained showErr — no dependency on external showErr()
   function showErr(msg, color){
-    if(errEl){
-      errEl.textContent    = msg;
-      errEl.style.display  = 'block';
-      errEl.style.color    = color || 'var(--red)';
-    }
+    if(errEl){ errEl.textContent=msg; errEl.style.display='block'; errEl.style.color=color||'var(--red)'; }
     console.warn('[Login]', msg);
   }
   function clearErr(){
     if(errEl){ errEl.style.display='none'; errEl.textContent=''; errEl.style.color='var(--red)'; }
   }
+  // Safe APP getter — const APP is NOT on window in modern browsers
+  function safeAPP(){
+    try{ if(typeof APP!=='undefined' && APP && typeof APP==='object') return APP; }catch(e){}
+    return window.APP || null;
+  }
 
-  var username = uEl ? uEl.value.trim() : '';
-  var password = pEl ? pEl.value.trim() : '';
+  var username = (uEl ? uEl.value : '').trim();
+  var password = (pEl ? pEl.value : '').trim();
 
   clearErr();
 
-  if(!username || !password){
-    showErr('Username aur password dono enter karo.');
-    return;
-  }
+  if(!username || !password){ showErr('Username aur password dono enter karo.'); return; }
 
-  // Disable button + show loading
   if(btnEl){ btnEl.disabled=true; btnEl.textContent='Logging in...'; }
 
   try{
-    // STEP 1: Make sure APP exists and users are loaded
-    var _appLogin = null; try{ if(typeof APP!=='undefined'&&APP) _appLogin=APP; }catch(e){} if(!_appLogin) _appLogin=window.APP;
-    // Flush pending users if any were loaded before APP was ready
-    if(window.__pendingUsers && window.__pendingUsers.length && (!APP.users || !APP.users.length)){
-      APP.users = window.__pendingUsers; window.__pendingUsers = null;
+    var _app = safeAPP();
+
+    // Flush any users that loaded before APP was ready
+    if(window.__pendingUsers && window.__pendingUsers.length){
+      if(_app && (!_app.users || !_app.users.length)) _app.users = window.__pendingUsers;
+      window.__pendingUsers = null;
     }
-    var usersReady = Array.isArray(APP.users) &&
-      APP.users.some(function(u){ return u.username && u.password && u.status==='ACTIVE'; });
+
+    // STEP 1: ensure users are loaded
+    var _users = (_app && Array.isArray(_app.users)) ? _app.users : [];
+    var usersReady = _users.some(function(u){ return u.username && u.password && u.status==='ACTIVE'; });
 
     if(!usersReady){
-      if(errEl){ errEl.style.color='var(--yellow)'; errEl.textContent='Users load ho rahe hain PASSWORD_MASTER se...'; errEl.style.display='block'; }
+      showErr('Users load ho rahe hain PASSWORD_MASTER se...', 'var(--yellow)');
       var loadResult = await loadUsersForLogin();
-      if(!loadResult.ok){
-        if(errEl){ errEl.style.color='var(--red)'; errEl.textContent=loadResult.error; errEl.style.display='block'; }
-        return;
-      }
-      if(errEl){ errEl.style.display='none'; }
+      if(!loadResult.ok){ showErr(loadResult.error); return; }
+      // Refresh _app and _users after load
+      _app   = safeAPP();
+      _users = (_app && Array.isArray(_app.users)) ? _app.users :
+               (window.__pendingUsers || []);
+      if(window.__pendingUsers){ _users=window.__pendingUsers; window.__pendingUsers=null; }
+      clearErr();
     }
 
-    // STEP 2: Find matching user
+    if(!_users.length){ showErr('Koi user nahi mila — Sync Now karke dobara try karo.'); return; }
+
+    // STEP 2: match credentials
     var matchedUser = null;
-    var _usersList = (_appLogin && _appLogin.users) || (window.__pendingUsers) || [];
-    for(var i=0; i < _usersList.length; i++){
-      var u = _usersList[i];
-      if(String(u.username||'').trim() === username &&
+    for(var i=0; i<_users.length; i++){
+      var u = _users[i];
+      if(String(u.username||'').trim()===username &&
          doLoginCompare(u.password, password) &&
-         String(u.status||'ACTIVE').toUpperCase() === 'ACTIVE'){
-        matchedUser = u;
-        break;
+         String(u.status||'ACTIVE').toUpperCase()==='ACTIVE'){
+        matchedUser = u; break;
       }
     }
 
     if(!matchedUser){
-      // Check if username exists but password wrong
-      var userExists = _usersList.some(function(u){ return String(u.username||'').trim()===username; });
-      var lockedUser = _usersList.find(function(u){ return String(u.username||'').trim()===username && String(u.status||'').toUpperCase()==='LOCKED'; });
-      if(lockedUser){
-        if(errEl){ errEl.textContent='Account locked hai. Admin se rabita karo.'; errEl.style.display='block'; }
-      } else if(userExists){
-        if(errEl){ errEl.textContent='Password galat hai.'; errEl.style.display='block'; }
-      } else {
-        if(errEl){ errEl.textContent='Username nahi mila PASSWORD_MASTER mein.'; errEl.style.display='block'; }
-      }
+      var exists = _users.some(function(u){ return String(u.username||'').trim()===username; });
+      var locked = _users.find(function(u){
+        return String(u.username||'').trim()===username &&
+               String(u.status||'').toUpperCase()==='LOCKED';
+      });
+      if(locked)       showErr('Account locked hai — Admin se rabita karo.');
+      else if(exists)  showErr('Password galat hai.');
+      else             showErr('Username "'+username+'" nahi mila PASSWORD_MASTER mein.');
       return;
     }
 
-    // STEP 3: Set current user — guard against APP not ready
-    var _appLogin = window.APP;
-    if(!_appLogin){ showErr('App not initialized — page reload karo (F5).'); return; }
-    if(typeof window.setCurrentUser === 'function'){
-      _appLogin.currentUser = window.setCurrentUser(matchedUser);
-    } else {
-      _appLogin.currentUser = matchedUser;
-    }
-    // Also flush any pending users loaded before APP was ready
-    if(window.__pendingUsers && window.__pendingUsers.length && (!_appLogin.users || !_appLogin.users.length)){
-      _appLogin.users = window.__pendingUsers;
-      window.__pendingUsers = null;
-    }
+    // STEP 3: set current user
+    if(!_app){ showErr('App initialize nahi hua — page reload karo (F5).'); return; }
+    var cu = (typeof window.setCurrentUser==='function') ? window.setCurrentUser(matchedUser) : matchedUser;
+    _app.currentUser = cu;
 
-    // STEP 4: Update UI
-    applyPostLoginUI(matchedUser);
+    // STEP 4: save session
+    try{ localStorage.setItem('up_current_user', JSON.stringify({
+      username:cu.username, password:cu.password, name:cu.name,
+      role:cu.role, dept:cu.dept||'', status:cu.status||'ACTIVE',
+      permissions:cu.permissions||{}, _savedAt:Date.now()
+    })); }catch(e){}
 
-    // STEP 5: Navigate to dashboard
-    if(typeof window.navigate === 'function'){
-      setTimeout(function(){ window.navigate('dashboard'); }, 50);
-    }
+    // STEP 5: update UI
+    var lp = document.getElementById('login-page');
+    var ap = document.getElementById('app-container') || document.getElementById('main-app');
+    if(lp) lp.style.display='none';
+    if(ap) ap.style.display='';
 
-    // STEP 6: Post-login hooks — UPC cache, backup scheduler, etc.
+    var sbUser = document.getElementById('sidebar-username');
+    var sbRole = document.getElementById('sidebar-role');
+    if(sbUser) sbUser.textContent = cu.name || cu.username;
+    if(sbRole) sbRole.textContent = String(cu.role||'').replace(/_/g,' ');
+
+    var rb  = document.getElementById('user-role-badge');
+    var rbr = document.getElementById('user-badge-role');
+    if(rb)  rb.textContent  = String(cu.role||'').replace(/_/g,' ');
+    if(rbr) rbr.textContent = String(cu.role||'').replace(/_/g,' ');
+
+    var sNav = document.getElementById('nav-settings-item');
+    if(sNav) sNav.style.display = (cu.role==='MAIN_ADMIN') ? '' : 'none';
+
+    // STEP 6: navigate + post-login hooks
+    if(typeof window.navigate==='function') setTimeout(function(){ window.navigate('dashboard'); }, 50);
     setTimeout(function(){
-      try{ if(typeof window.upcStartPeriodicSave === 'function') window.upcStartPeriodicSave(); }catch(e){}
-      try{ if(getAPP() && APP.currentUser && APP.currentUser.role==='MAIN_ADMIN' && typeof window.upcStartBackupScheduler==='function') window.upcStartBackupScheduler(); }catch(e){}
+      try{ if(typeof window.upcStartPeriodicSave==='function') window.upcStartPeriodicSave(); }catch(e){}
+      try{ if(cu.role==='MAIN_ADMIN'&&typeof window.upcStartBackupScheduler==='function') window.upcStartBackupScheduler(); }catch(e){}
       try{ if(typeof window.ppCheckUnlockNotif==='function') window.ppCheckUnlockNotif(); }catch(e){}
       try{ if(typeof window.sofUpdateAgo==='function') window.sofUpdateAgo(); }catch(e){}
       try{ if(typeof window.updateUserBadge==='function') window.updateUserBadge(); }catch(e){}
-    }, 200);
+      try{ if(typeof window.upcSave==='function') window.upcSave('login'); }catch(e){}
+    }, 300);
 
-    console.log('[Login] ✅ Login successful:', matchedUser.username, '|', matchedUser.role);
+    console.log('[Login] ✅ Login successful:', cu.username, '|', cu.role);
 
   }catch(fatalErr){
     console.error('[Login] Fatal error:', fatalErr);
-    if(errEl){ errEl.textContent='Login error: ' + fatalErr.message; errEl.style.display='block'; }
+    showErr('Login error: ' + fatalErr.message);
   }finally{
     if(btnEl){ btnEl.disabled=false; btnEl.textContent='Login'; }
   }
-};
-
-console.log('[UP ERP Master Login Fix v1.0] Loaded — doLogin replaced with single clean async function');
+}sole.log('[UP ERP Master Login Fix v1.0] Loaded — doLogin replaced with single clean async function');
 })();
 
 // ── Global safe APP getter (available to all scripts) ────────────────────────
@@ -20912,8 +20920,8 @@ function masterGetUrl(){
   var _t = setInterval(function(){
     try{
       if(getAPP() && APP.settings !== undefined){
-        if(!APP.settings.appScriptUrl || !APP.settings.appScriptUrl.includes('script.google')){
-          APP.settings.appScriptUrl = MASTER_SCRIPT_URL;
+        var _as=getAPP(); if(_as&&_as.settings&&(!_as.settings.appScriptUrl||!_as.settings.appScriptUrl.includes('script.google'))){
+          _as.settings.appScriptUrl = MASTER_SCRIPT_URL;
         }
         // Flush any users that were loaded before APP was ready
         if(window.__pendingUsers && window.__pendingUsers.length && (!APP.users || !APP.users.length)){
