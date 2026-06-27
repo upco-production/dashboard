@@ -7661,7 +7661,7 @@ function editRecord(id){
     const la=info?String(info.closedAt||info.LOCKED_AT||info.lockDate||'').slice(0,10):'';
     document.getElementById('modal-title').textContent='⛔ Period Locked — '+r.month;
     document.getElementById('modal-body').innerHTML=`<div style="text-align:center;padding:24px 16px"><div style="font-size:48px;margin-bottom:12px">🔒</div><div style="font-size:16px;font-weight:700;color:var(--red);margin-bottom:8px">Posting Period Locked</div><div style="font-size:13px;color:var(--text2);margin-bottom:16px"><b>${r.month}</b> locked${lb?' by <b>'+lb+'</b>':''}${la?' on '+la:''}.<br>Is period mein edit nahi ho sakti.</div>${APP?.currentUser?.role==='MAIN_ADMIN'?'<div style="margin-top:12px;font-size:11px;color:var(--cyan)">💡 Settings → Posting Periods se unlock karen</div>':''}</div>`;
-    document.getElementById('modal-footer').innerHTML=`<button class="btn btn-outline" onclick="closeModal()">Close</button>${APP?.currentUser?.role!=='MAIN_ADMIN'?'<button class="btn btn-primary" onclick="window.ppRequestUnlock(''+r.month+'')">📨 Unlock Request</button>':''}`;
+    document.getElementById('modal-footer').innerHTML='<button class="btn btn-outline" onclick="closeModal()">Close</button>'+(APP&&APP.currentUser&&APP.currentUser.role!=='MAIN_ADMIN'?'<button class="btn btn-primary" onclick="window.ppRequestUnlock(\''+r.month+'\')" >📨 Unlock Request</button>':'');
     document.getElementById('modal-overlay').style.display='flex';
     return;
   }
@@ -11047,7 +11047,7 @@ debugLog('ok','Auto sync patch loaded','Dashboard will render immediately and re
 // =============================================
 
 // Save page state to localStorage whenever navigate() is called
-const _origNavigate = navigate;
+var _origNavigate = (typeof navigate!=="undefined") ? navigate : null;
 navigate = function(page) {
   // Feature 2: persist current page
   try { localStorage.setItem('up_currentPage', page); } catch(e) {}
@@ -11494,7 +11494,7 @@ navigate = (function(orig){
     const machineFactorsOEE = (cs.machineFactorsOEE && typeof cs.machineFactorsOEE==='object') ? cs.machineFactorsOEE : {};
     const machineSpeeds = (cs.machineStandardSpeeds && typeof cs.machineStandardSpeeds==='object') ? cs.machineStandardSpeeds : {};
 
-    (APP.productionData||[]).forEach(r=>{
+    ((typeof APP!=="undefined"&&APP&&APP.productionData)||[]).forEach(r=>{
       const prodKg = rowProductionKg(r);
       const totalWaste = rowTotalWaste(r);
       const pmin = n(pick(r,['PRODUCTION_MIN','PRODUCTION_RUNNING_MIN','RUNNING_MIN','PRODUCTION_TIME_MIN','productionMin'],0));
@@ -12188,6 +12188,7 @@ navigate = (function(orig){
   };
 
 
+  function safeJsonParse(raw, fallback){
     try{ return JSON.parse(raw); }catch(e){ return fallback; }
   }
 
@@ -13227,7 +13228,7 @@ console.log('[UP ERP V25] Detail report fix applied — renderDeptRows direct re
   }
 
   function patchBagCard(){
-    if(APP.currentPage !== 'dashboard') return;
+    if(typeof APP==='undefined'||!APP||APP.currentPage !== 'dashboard') return;
     var pcs = getBagPcsRaw();
     var MONTHLY = 7000000;
     var target = Math.max(1, MONTHLY * upPeriodFactorLocal());
@@ -13836,7 +13837,7 @@ console.log('[UP ERP V25] Detail report fix applied — renderDeptRows direct re
   function loadCache(){
     try{
       var raw = localStorage.getItem(CACHE_KEY);
-      if(raw){ var arr = JSON.parse(raw); if(Array.isArray(arr)){ APP.upDispatchData = arr; state.loaded = true; } }
+      if(raw){ var arr = JSON.parse(raw); if(Array.isArray(arr)){ (typeof APP!=="undefined"&&APP&&APP.upDispatchData) = arr; state.loaded = true; } }
     }catch(e){}
     if(!Array.isArray(APP.upDispatchData)) APP.upDispatchData = [];
   }
@@ -14636,8 +14637,8 @@ const TAB_PROG = 'MAINTENANCE_PROGRESS';
 
 // ── Cache ─────────────────────────────────────────────────────────────────
 const MR_KEY='up_maint_req_v2', MP_KEY='up_maint_prog_v2';
-if(!APP.maintenanceRequests) APP.maintenanceRequests=_lsGet(MR_KEY);
-if(!APP.maintenanceProgress) APP.maintenanceProgress=_lsGet(MP_KEY);
+if(typeof APP!=='undefined'&&APP&&!APP.maintenanceRequests) APP.maintenanceRequests=_lsGet(MR_KEY);
+if(typeof APP!=='undefined'&&APP&&!APP.maintenanceProgress) APP.maintenanceProgress=_lsGet(MP_KEY);
 function _lsGet(k){ try{const d=localStorage.getItem(k);return d?JSON.parse(d):[];}catch(e){return [];} }
 function _lsSet(k,v){ try{localStorage.setItem(k,JSON.stringify(v));}catch(e){} }
 function cacheReqs(){ _lsSet(MR_KEY,APP.maintenanceRequests||[]); }
@@ -18241,7 +18242,7 @@ setTimeout(function(){
   if(window.APP && APP.currentUser) return; // already logged in
   var loginPage = document.getElementById('login-page');
   if(!loginPage || loginPage.style.display==='none') return;
-  var cached = Array.isArray(APP.users) && APP.users.filter(function(u){ return u.username&&u.password&&u.status==='ACTIVE'; });
+  var cached = (typeof APP!=="undefined"&&Array.isArray(APP.users)) && APP.users.filter(function(u){ return u.username&&u.password&&u.status==='ACTIVE'; });
   if(cached && cached.length){
     var hint = document.getElementById('login-error');
     if(hint && hint.style.display==='none'){
@@ -18679,7 +18680,7 @@ if(typeof _sofOrigNavigate === 'function'){
 
 // ── Visibility change — resume bg jobs when tab becomes visible ─────────────
 document.addEventListener('visibilitychange', function(){
-  if(!document.hidden && APP?.currentUser){
+  if(!document.hidden && (typeof APP!=="undefined"&&APP&&APP.currentUser)){
     sofUpdateAgo();
     // If maintenance is open and stale, refresh
     if(APP.currentPage === 'maintenance'){
@@ -19799,7 +19800,7 @@ setTimeout(function(){
   if(window.APP && APP.currentUser) return; // already logged in
   var loginPage = document.getElementById('login-page');
   if(!loginPage || loginPage.style.display==='none') return;
-  var cached = Array.isArray(APP.users) && APP.users.filter(function(u){ return u.username&&u.password&&u.status==='ACTIVE'; });
+  var cached = (typeof APP!=="undefined"&&Array.isArray(APP.users)) && APP.users.filter(function(u){ return u.username&&u.password&&u.status==='ACTIVE'; });
   if(cached && cached.length){
     var hint = document.getElementById('login-error');
     if(hint && hint.style.display==='none'){
@@ -20398,7 +20399,7 @@ window.ppShowLockBanner = function(dept){
       (APP && APP.currentUser && APP.currentUser.role !== 'MAIN_ADMIN'
         ? '<button onclick="window.ppRequestUnlock(\'' + month + '\')" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:6px;padding:6px 12px;font-size:11px;cursor:pointer;font-weight:600">📨 Unlock Request bhejo</button>'
         : '<button onclick="window.ppAdminUnlock(\'' + month + '\')" style="background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;border-radius:6px;padding:6px 12px;font-size:11px;cursor:pointer;font-weight:600">🔓 Period Unlock</button>'),
-      '<button onclick="document.getElementById('pp-lock-banner').remove()" style="background:none;border:none;color:#fca5a5;font-size:16px;cursor:pointer;padding:4px">✕</button>',
+      '<button onclick="document.getElementById(\'pp-lock-banner\').remove()" style="background:none;border:none;color:#fca5a5;font-size:16px;cursor:pointer;padding:4px">✕</button>',
     '</div>'
   ].join('');
 
