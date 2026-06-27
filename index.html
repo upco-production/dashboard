@@ -20620,7 +20620,7 @@ function doLoginCompare(storedInSheet, inputFromUser){
 // ── Get Apps Script URL from any available source ────────────────────────────
 function getScriptUrl(){
   try{ var ls = localStorage.getItem('up_appScriptUrl'); if(ls && ls.includes('script.google')) return ls; }catch(e){}
-  try{ if(window.APP && APP.settings && APP.settings.appScriptUrl && APP.settings.appScriptUrl.includes('script.google')) return APP.settings.appScriptUrl; }catch(e){}
+  try{ if(getAPP() && APP.settings && APP.settings.appScriptUrl && APP.settings.appScriptUrl.includes('script.google')) return APP.settings.appScriptUrl; }catch(e){}
   try{ if(window.ERP_SHEET_CONFIG && ERP_SHEET_CONFIG.APP_SCRIPT_URL) return ERP_SHEET_CONFIG.APP_SCRIPT_URL; }catch(e){}
   return '';
 }
@@ -20671,7 +20671,15 @@ async function loadUsersForLogin(){
     }).filter(function(u){ return u.username && u.password; });
 
     if(!users.length) return { ok:false, error:'PASSWORD_MASTER mein active users nahi hain (username/password empty).' };
-    window.APP.users = users;
+    // Assign users — use bare APP (const global) not window.APP
+    try{
+      if(typeof APP !== 'undefined' && APP){ APP.users = users; }
+      else if(window.APP){ window.APP.users = users; }
+      else { window.__pendingUsers = users; }
+    }catch(assignErr){
+      window.__pendingUsers = users;
+      console.warn('[loadUsers] APP assign fallback to __pendingUsers:', assignErr.message);
+    }
     return { ok:true, count:users.length };
   }catch(err){
     return { ok:false, error:'Network error: ' + err.message };
@@ -20743,8 +20751,13 @@ window.doLogin = async function(){
   if(btnEl){ btnEl.disabled=true; btnEl.textContent='Logging in...'; }
 
   try{
-    // STEP 1: Make sure users are loaded
-    var usersReady = window.APP && Array.isArray(APP.users) &&
+    // STEP 1: Make sure APP exists and users are loaded
+    if(!window.APP){ showError('App not initialized — page reload karo (F5).'); return; }
+    // Flush pending users if any were loaded before APP was ready
+    if(window.__pendingUsers && window.__pendingUsers.length && (!APP.users || !APP.users.length)){
+      APP.users = window.__pendingUsers; window.__pendingUsers = null;
+    }
+    var usersReady = Array.isArray(APP.users) &&
       APP.users.some(function(u){ return u.username && u.password && u.status==='ACTIVE'; });
 
     if(!usersReady){
@@ -20783,11 +20796,18 @@ window.doLogin = async function(){
       return;
     }
 
-    // STEP 3: Set current user (use existing setCurrentUser if available)
+    // STEP 3: Set current user — guard against APP not ready
+    var _appLogin = window.APP;
+    if(!_appLogin){ console.error('[Login] APP object not found!'); showError && showError('App not initialized. Page reload karo.'); return; }
     if(typeof window.setCurrentUser === 'function'){
-      window.APP.currentUser = window.setCurrentUser(matchedUser);
+      _appLogin.currentUser = window.setCurrentUser(matchedUser);
     } else {
-      window.APP.currentUser = matchedUser;
+      _appLogin.currentUser = matchedUser;
+    }
+    // Also flush any pending users loaded before APP was ready
+    if(window.__pendingUsers && window.__pendingUsers.length && (!_appLogin.users || !_appLogin.users.length)){
+      _appLogin.users = window.__pendingUsers;
+      window.__pendingUsers = null;
     }
 
     // STEP 4: Update UI
@@ -20801,7 +20821,7 @@ window.doLogin = async function(){
     // STEP 6: Post-login hooks — UPC cache, backup scheduler, etc.
     setTimeout(function(){
       try{ if(typeof window.upcStartPeriodicSave === 'function') window.upcStartPeriodicSave(); }catch(e){}
-      try{ if(window.APP && APP.currentUser && APP.currentUser.role==='MAIN_ADMIN' && typeof window.upcStartBackupScheduler==='function') window.upcStartBackupScheduler(); }catch(e){}
+      try{ if(getAPP() && APP.currentUser && APP.currentUser.role==='MAIN_ADMIN' && typeof window.upcStartBackupScheduler==='function') window.upcStartBackupScheduler(); }catch(e){}
       try{ if(typeof window.ppCheckUnlockNotif==='function') window.ppCheckUnlockNotif(); }catch(e){}
       try{ if(typeof window.sofUpdateAgo==='function') window.sofUpdateAgo(); }catch(e){}
       try{ if(typeof window.updateUserBadge==='function') window.updateUserBadge(); }catch(e){}
@@ -20819,6 +20839,15 @@ window.doLogin = async function(){
 
 console.log('[UP ERP Master Login Fix v1.0] Loaded — doLogin replaced with single clean async function');
 })();
+
+// ── Global safe APP getter (available to all scripts) ────────────────────────
+if(typeof window.getAPP !== 'function'){
+  window.getAPP = function(){
+    try{ if(typeof APP!=='undefined' && APP && typeof APP==='object') return APP; }catch(e){}
+    try{ if(window.APP) return window.APP; }catch(e){}
+    return null;
+  };
+}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // UP ERP — MASTER SYNC & CONNECTION FIX v1.0
@@ -20866,12 +20895,18 @@ function masterGetUrl(){
       console.log('[UP ERP] Apps Script URL auto-saved to localStorage');
     }
   }catch(e){}
-  // Push into APP.settings as soon as APP object is ready
+  // Push into APP.settings and flush any pending users as soon as APP is ready
   var _t = setInterval(function(){
     try{
-      if(window.APP && APP.settings !== undefined){
+      if(getAPP() && APP.settings !== undefined){
         if(!APP.settings.appScriptUrl || !APP.settings.appScriptUrl.includes('script.google')){
           APP.settings.appScriptUrl = MASTER_SCRIPT_URL;
+        }
+        // Flush any users that were loaded before APP was ready
+        if(window.__pendingUsers && window.__pendingUsers.length && (!APP.users || !APP.users.length)){
+          APP.users = window.__pendingUsers;
+          window.__pendingUsers = null;
+          console.log('[UP ERP] Flushed ' + APP.users.length + ' pending users into APP.users');
         }
         clearInterval(_t);
       }
@@ -21064,8 +21099,14 @@ window.preLoginSyncDiagnostics = async function(){
     var users = rows.map(normalizeUserRow).filter(function(u){ return u.username && u.password; });
     if(!users.length) throw new Error('Rows mili (' + rows.length + ') lekin username/password empty — headers check karo: USERNAME, PASSWORD, ROLE, STATUS');
     var active = users.filter(function(u){ return u.status==='ACTIVE'; });
-    window.APP.users = users; // load all, login filters by ACTIVE
-    showMsg('✅ ' + active.length + ' active user(s) loaded from PASSWORD_MASTER. Ab login karo.', 'var(--green)');
+    // Safe assignment — guard against APP not ready
+    // Safely assign — const APP is global but NOT on window in all browsers
+    try{
+      if(typeof APP!=='undefined' && APP){ APP.users = users; }
+      else if(window.APP){ window.APP.users = users; }
+      else { window.__pendingUsers = users; }
+    }catch(e){ window.__pendingUsers = users; }
+    showMsg('\u2705 ' + active.length + ' active user(s) loaded from PASSWORD_MASTER. Ab login karo.', 'var(--green)');
     mLog('ok', 'PreLogin: users loaded', active.length + ' active of ' + users.length + ' total');
   }catch(readErr){
     showMsg('❌ PASSWORD_MASTER read failed: ' + (readErr.message||String(readErr)), 'var(--red)');
@@ -21108,7 +21149,13 @@ window.syncAllSheets = async function(options){
       'PASSWORD_MASTER'
     );
     var users = pwdRows.map(normalizeUserRow).filter(function(u){ return u.username&&u.password; });
-    if(users.length) window.APP.users = users;
+    if(users.length){
+      try{
+        if(typeof APP!=='undefined'&&APP) APP.users=users;
+        else if(window.APP) window.APP.users=users;
+        else window.__pendingUsers=users;
+      }catch(e){ window.__pendingUsers=users; }
+    }
     mLog('ok', 'SYSTEM_MASTER/PASSWORD_MASTER', users.length + ' user(s)');
     try{ if(typeof setSourceStatus==='function') setSourceStatus('SYSTEM_MASTER','OK',users.length); }catch(e){}
   }catch(e){
@@ -21123,7 +21170,7 @@ window.syncAllSheets = async function(options){
       'MACHINE_MASTER'
     );
     if(machRows.length){
-      window.APP.machineMasterData = machRows;
+      getAPP().machineMasterData = machRows;
       mLog('ok', 'MACHINE_MASTER', machRows.length + ' row(s)');
     }
   }catch(e){ mLog('warn', 'MACHINE_MASTER skipped', e.message); }
@@ -21135,7 +21182,7 @@ window.syncAllSheets = async function(options){
       'POSTING_PERIOD_MASTER'
     );
     if(ppRows.length){
-      window.APP.postingPeriods = ppRows;
+      getAPP().postingPeriods = ppRows;
       try{ if(typeof window.ppBuildIndex==='function') window.ppBuildIndex(ppRows); }catch(e){}
       mLog('ok', 'POSTING_PERIOD_MASTER', ppRows.length + ' row(s)');
     }
@@ -21186,7 +21233,7 @@ window.syncAllSheets = async function(options){
     var normalize = (window.UP_LIVE_V4 && window.UP_LIVE_V4._productionNormalize) || function(r){ return r; };
     var inkNorm   = (window.UP_LIVE_V4 && window.UP_LIVE_V4._normalizeInk)        || function(r){ return r; };
 
-    window.APP.inkData = (prodRaw.INK_MASTER||[]).map(inkNorm);
+    getAPP().inkData = (prodRaw.INK_MASTER||[]).map(inkNorm);
 
     var allProdRows = ['PRINTING_MASTER','LAMINATION_MASTER','SLITTING_MASTER','BAG_MAKING_MASTER']
       .reduce(function(acc, tab){
@@ -21194,16 +21241,16 @@ window.syncAllSheets = async function(options){
       }, []);
 
     if(allProdRows.length){
-      window.APP.productionData = allProdRows;
+      try{ if(typeof APP!=='undefined'&&APP) APP.productionData=allProdRows; else if(window.APP) window.APP.productionData=allProdRows; }catch(e){}
       mLog('ok', 'Production data assigned', allProdRows.length + ' total rows');
     } else if(errors.length === 0){
       mLog('warn', 'Production data empty', 'All tabs returned 0 rows — check sheet data and Apps Script read');
     }
 
     // Quality / Dispatch / FG
-    if(prodRaw.QUALITY_MASTER&&prodRaw.QUALITY_MASTER.length)   window.APP.qualityData   = prodRaw.QUALITY_MASTER;
-    if(prodRaw.DISPATCH_MASTER&&prodRaw.DISPATCH_MASTER.length) window.APP.dispatchData  = prodRaw.DISPATCH_MASTER;
-    if(prodRaw.FG_MASTER&&prodRaw.FG_MASTER.length)             window.APP.fgData        = prodRaw.FG_MASTER;
+    if(prodRaw.QUALITY_MASTER&&prodRaw.QUALITY_MASTER.length)   getAPP().qualityData   = prodRaw.QUALITY_MASTER;
+    if(prodRaw.DISPATCH_MASTER&&prodRaw.DISPATCH_MASTER.length) getAPP().dispatchData  = prodRaw.DISPATCH_MASTER;
+    if(prodRaw.FG_MASTER&&prodRaw.FG_MASTER.length)             getAPP().fgData        = prodRaw.FG_MASTER;
   }catch(assignErr){
     errors.push('Data assign error: ' + assignErr.message);
     mLog('err', 'Production data assign failed', assignErr.message);
@@ -21215,7 +21262,7 @@ window.syncAllSheets = async function(options){
       await masterFetch(buildReadUrl(url, SHEET_IDS.MATERIAL_MASTER, 'MATERIAL_MASTER', 4), {}, 20000),
       'MATERIAL_MASTER'
     );
-    if(matRows.length){ window.APP.materialData = matRows; mLog('ok','MATERIAL_MASTER',matRows.length+' row(s)'); }
+    if(matRows.length){ getAPP().materialData = matRows; mLog('ok','MATERIAL_MASTER',matRows.length+' row(s)'); }
   }catch(e){ mLog('warn','MATERIAL_MASTER skipped',e.message); }
 
   // ── STEP 7: Planning Master ───────────────────────────────────────────────
@@ -21224,7 +21271,7 @@ window.syncAllSheets = async function(options){
       await masterFetch(buildReadUrl(url, SHEET_IDS.PLANNING_MASTER, 'PLANNING_ORDER_MASTER', 5), {}, 20000),
       'PLANNING_ORDER_MASTER'
     );
-    if(planRows.length){ window.APP.planningData = planRows; mLog('ok','PLANNING_ORDER_MASTER',planRows.length+' row(s)'); }
+    if(planRows.length){ getAPP().planningData = planRows; mLog('ok','PLANNING_ORDER_MASTER',planRows.length+' row(s)'); }
   }catch(e){ mLog('warn','PLANNING_ORDER_MASTER skipped',e.message); }
 
   // ── STEP 8: WIP Master ────────────────────────────────────────────────────
@@ -21237,8 +21284,8 @@ window.syncAllSheets = async function(options){
           wipTabs[wi]
         );
         if(wipRows.length){
-          if(!window.APP.wipData) window.APP.wipData = {};
-          window.APP.wipData[wipTabs[wi]] = wipRows;
+          if(!getAPP().wipData) getAPP().wipData = {};
+          getAPP().wipData[wipTabs[wi]] = wipRows;
           mLog('ok','WIP/'+wipTabs[wi],wipRows.length+' row(s)');
         }
       }catch(we){ mLog('warn','WIP/'+wipTabs[wi]+' skipped',we.message); }
@@ -21255,7 +21302,7 @@ window.syncAllSheets = async function(options){
 
   // Save to cache
   try{ if(typeof window.upcSave==='function') window.upcSave('master-sync'); }catch(e){}
-  try{ if(typeof window.sdcSave==='function' && window.APP.productionData) window.sdcSave(window.APP.productionData); }catch(e){}
+  try{ if(typeof window.sdcSave==='function' && getAPP().productionData) window.sdcSave(getAPP().productionData); }catch(e){}
 
   if(errors.length){
     var errMsg = errors.slice(0,3).join(' | ') + (errors.length>3?' (+' + (errors.length-3) + ' more)':'');
@@ -21268,7 +21315,7 @@ window.syncAllSheets = async function(options){
 
   // Re-render current page
   try{
-    var page = window.APP && (APP.currentPage||'dashboard');
+    var page = getAPP() && (APP.currentPage||'dashboard');
     if(typeof refreshCurrentPageAfterSync==='function') refreshCurrentPageAfterSync(page);
     else if(typeof navigate==='function') navigate(page);
   }catch(e){}
@@ -21329,7 +21376,7 @@ window.showConnectionStatus = async function(){
 
 // ── ensureSystemUsersLoaded — used by login ───────────────────────────────────
 window.ensureSystemUsersLoaded = async function(){
-  if(window.APP && Array.isArray(APP.users) &&
+  if(getAPP() && Array.isArray(APP.users) &&
      APP.users.some(function(u){ return u.username&&u.password&&u.status==='ACTIVE'; })) return true;
   var url = masterGetUrl();
   if(!url) return false;
@@ -21337,7 +21384,14 @@ window.ensureSystemUsersLoaded = async function(){
     var data = await masterFetch(buildReadUrl(url, SHEET_IDS.SYSTEM_MASTER, 'PASSWORD_MASTER', 3), {}, 20000);
     var rows = extractRows(data, 'PASSWORD_MASTER');
     var users = rows.map(normalizeUserRow).filter(function(u){ return u.username&&u.password; });
-    if(users.length){ window.APP.users = users; return true; }
+    if(users.length){
+      try{
+        if(typeof APP !== 'undefined' && APP) APP.users = users;
+        else if(getAPP()) getAPP().users = users;
+        else window.__pendingUsers = users;
+      }catch(e){ window.__pendingUsers = users; }
+      return true;
+    }
     return false;
   }catch(e){ mLog('err','ensureSystemUsersLoaded failed',e.message); return false; }
 };
@@ -21353,7 +21407,7 @@ window.upSaveLoginUrl = function(val){
     return;
   }
   try{ localStorage.setItem('up_appScriptUrl', val); }catch(e){}
-  try{ if(window.APP && APP.settings) APP.settings.appScriptUrl = val; }catch(e){}
+  try{ if(getAPP() && APP.settings) APP.settings.appScriptUrl = val; }catch(e){}
   var badge = document.getElementById('login-url-status');
   if(badge){ badge.textContent='saved'; badge.style.background='rgba(63,185,80,.1)'; badge.style.color='var(--green)'; }
   console.log('[UP ERP] Apps Script URL saved from login page:', val.slice(0,60)+'...');
