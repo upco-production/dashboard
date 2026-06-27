@@ -519,6 +519,23 @@ tr:hover td{background:rgba(255,255,255,.02)}
     <div class="login-error" id="login-error">Invalid username or password</div>
     <button class="login-btn" onclick="doLogin()">Login</button>
     <button class="btn btn-outline" style="width:100%;margin-top:10px" onclick="preLoginSyncDiagnostics()">Test Sheet Connection / Load Users</button>
+    <div id="login-url-section" style="margin-top:12px">
+      <div style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-bottom:6px" onclick="(function(){var s=document.getElementById('login-url-fields');s.style.display=s.style.display==='none'?'block':'none'})()">
+        <span style="font-size:10px;color:var(--text3)">⚙ Apps Script URL</span>
+        <span id="login-url-status" style="font-size:10px;padding:1px 6px;border-radius:8px;background:rgba(57,208,216,.1);color:var(--cyan);border:1px solid rgba(57,208,216,.2)">auto</span>
+      </div>
+      <div id="login-url-fields" style="display:none">
+        <input type="text" id="login-script-url" placeholder="https://script.google.com/macros/s/.../exec"
+          style="width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:7px 10px;color:var(--text);font-size:11px;font-family:monospace;outline:none;margin-bottom:6px"
+          onfocus="this.style.borderColor='var(--cyan2)'" onblur="this.style.borderColor='var(--border)'"
+          oninput="upSaveLoginUrl(this.value)">
+        <div style="font-size:10px;color:var(--text3);margin-bottom:4px">Apni deployed Apps Script URL yahan paste karo</div>
+        <button onclick="upSaveLoginUrl(document.getElementById('login-script-url').value);preLoginSyncDiagnostics()"
+          style="width:100%;padding:6px;background:rgba(31,111,235,.15);border:1px solid rgba(31,111,235,.3);border-radius:6px;color:var(--cyan);font-size:11px;cursor:pointer">
+          💾 Save & Test Connection
+        </button>
+      </div>
+    </div>
     <div id="offline-login-hint" style="margin-top:12px;padding:8px 10px;border-radius:8px;background:rgba(63,185,80,.08);border:1px solid rgba(63,185,80,.25);font-size:11px;color:#8b949e;display:none">
       📡 No internet? If you have logged in on this device before, your account still works offline using locally cached data. It will re-sync automatically once you're back online.
     </div>
@@ -20821,13 +20838,46 @@ console.log('[UP ERP Master Login Fix v1.0] Loaded — doLogin replaced with sin
 (function(){
 
 // ── Get Apps Script URL — check every possible storage location ──────────────
+// ── HARDCODED FALLBACK — change this if your Apps Script URL changes ─────────
+var MASTER_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxeLyxLK1I9wc022j5JU6pjrd9G360lC9Sd1jCWm5Plkh0qy2u99jO8b8D-RyjgRkMORw/exec';
+
 function masterGetUrl(){
+  // 1. Login page URL input (user typed a custom URL)
+  try{ var inp=document.getElementById('login-script-url'); if(inp&&inp.value&&inp.value.includes('script.google')) return inp.value.trim(); }catch(e){}
+  // 2. localStorage (previously saved)
   try{ var ls=localStorage.getItem('up_appScriptUrl'); if(ls&&ls.includes('script.google')) return ls.trim(); }catch(e){}
+  // 3. APP.settings (set via Settings panel)
   try{ if(window.APP&&APP.settings&&APP.settings.appScriptUrl&&APP.settings.appScriptUrl.includes('script.google')) return APP.settings.appScriptUrl.trim(); }catch(e){}
+  // 4. ERP_SHEET_CONFIG (defined earlier in file)
   try{ if(window.ERP_SHEET_CONFIG&&ERP_SHEET_CONFIG.APP_SCRIPT_URL) return ERP_SHEET_CONFIG.APP_SCRIPT_URL.trim(); }catch(e){}
+  // 5. V4 config
   try{ if(window.UP_LIVE_V4&&UP_LIVE_V4.appScriptUrl) return UP_LIVE_V4.appScriptUrl.trim(); }catch(e){}
-  return '';
+  // 6. HARDCODED FALLBACK — always returns a valid URL
+  return MASTER_SCRIPT_URL;
 }
+
+// ── Auto-save hardcoded URL to localStorage + APP.settings on first load ─────
+// This ensures every other function in the file also finds the URL
+(function(){
+  try{
+    var existing = localStorage.getItem('up_appScriptUrl');
+    if(!existing || !existing.includes('script.google')){
+      localStorage.setItem('up_appScriptUrl', MASTER_SCRIPT_URL);
+      console.log('[UP ERP] Apps Script URL auto-saved to localStorage');
+    }
+  }catch(e){}
+  // Push into APP.settings as soon as APP object is ready
+  var _t = setInterval(function(){
+    try{
+      if(window.APP && APP.settings !== undefined){
+        if(!APP.settings.appScriptUrl || !APP.settings.appScriptUrl.includes('script.google')){
+          APP.settings.appScriptUrl = MASTER_SCRIPT_URL;
+        }
+        clearInterval(_t);
+      }
+    }catch(e){ clearInterval(_t); }
+  }, 50);
+})();
 
 // ── Safe toast + debugLog ────────────────────────────────────────────────────
 function mToast(msg, type){
@@ -21291,6 +21341,41 @@ window.ensureSystemUsersLoaded = async function(){
     return false;
   }catch(e){ mLog('err','ensureSystemUsersLoaded failed',e.message); return false; }
 };
+
+// ── upSaveLoginUrl — called when user types/pastes a URL on login page ──────
+window.upSaveLoginUrl = function(val){
+  val = String(val||'').trim();
+  if(!val) return;
+  // Validate it looks like an Apps Script URL
+  if(!val.includes('script.google.com/macros')){
+    var badge = document.getElementById('login-url-status');
+    if(badge){ badge.textContent='invalid'; badge.style.background='rgba(248,81,73,.1)'; badge.style.color='var(--red)'; }
+    return;
+  }
+  try{ localStorage.setItem('up_appScriptUrl', val); }catch(e){}
+  try{ if(window.APP && APP.settings) APP.settings.appScriptUrl = val; }catch(e){}
+  var badge = document.getElementById('login-url-status');
+  if(badge){ badge.textContent='saved'; badge.style.background='rgba(63,185,80,.1)'; badge.style.color='var(--green)'; }
+  console.log('[UP ERP] Apps Script URL saved from login page:', val.slice(0,60)+'...');
+};
+
+// ── Auto-fill login page URL input from saved/hardcoded value ────────────────
+setTimeout(function(){
+  try{
+    var inp = document.getElementById('login-script-url');
+    if(!inp) return;
+    var saved = masterGetUrl();
+    if(saved){ inp.value = saved; }
+    // Update status badge
+    var badge = document.getElementById('login-url-status');
+    if(badge){
+      var fromLS = localStorage.getItem('up_appScriptUrl');
+      badge.textContent = fromLS && fromLS.includes('script.google') ? 'saved' : 'default';
+      badge.style.background = 'rgba(57,208,216,.1)';
+      badge.style.color = 'var(--cyan)';
+    }
+  }catch(e){}
+}, 300);
 
 mLog('ok','Master Sync & Connection Fix v1.0 loaded',
   'testConnection + syncAllSheets + syncNowClick + preLoginSyncDiagnostics replaced');
