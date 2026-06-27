@@ -20731,19 +20731,31 @@ function applyPostLoginUI(user){
 
 // ── THE MASTER doLogin ────────────────────────────────────────────────────────
 window.doLogin = async function(){
-  var uEl = document.getElementById('login-user');
-  var pEl = document.getElementById('login-pass');
-  var errEl = document.getElementById('login-error');
-  var btnEl = document.querySelector('.login-btn');
+  var uEl    = document.getElementById('login-user');
+  var pEl    = document.getElementById('login-pass');
+  var errEl  = document.getElementById('login-error');
+  var btnEl  = document.querySelector('.login-btn');
+
+  // Self-contained showErr — no dependency on external showErr()
+  function showErr(msg, color){
+    if(errEl){
+      errEl.textContent    = msg;
+      errEl.style.display  = 'block';
+      errEl.style.color    = color || 'var(--red)';
+    }
+    console.warn('[Login]', msg);
+  }
+  function clearErr(){
+    if(errEl){ errEl.style.display='none'; errEl.textContent=''; errEl.style.color='var(--red)'; }
+  }
 
   var username = uEl ? uEl.value.trim() : '';
   var password = pEl ? pEl.value.trim() : '';
 
-  // Clear previous error
-  if(errEl){ errEl.style.display='none'; errEl.style.color='var(--red)'; errEl.textContent=''; }
+  clearErr();
 
   if(!username || !password){
-    if(errEl){ errEl.textContent='Username aur password dono enter karo.'; errEl.style.display='block'; }
+    showErr('Username aur password dono enter karo.');
     return;
   }
 
@@ -20752,7 +20764,7 @@ window.doLogin = async function(){
 
   try{
     // STEP 1: Make sure APP exists and users are loaded
-    if(!window.APP){ showError('App not initialized — page reload karo (F5).'); return; }
+    var _appLogin = null; try{ if(typeof APP!=='undefined'&&APP) _appLogin=APP; }catch(e){} if(!_appLogin) _appLogin=window.APP;
     // Flush pending users if any were loaded before APP was ready
     if(window.__pendingUsers && window.__pendingUsers.length && (!APP.users || !APP.users.length)){
       APP.users = window.__pendingUsers; window.__pendingUsers = null;
@@ -20772,8 +20784,9 @@ window.doLogin = async function(){
 
     // STEP 2: Find matching user
     var matchedUser = null;
-    for(var i=0; i < APP.users.length; i++){
-      var u = APP.users[i];
+    var _usersList = (_appLogin && _appLogin.users) || (window.__pendingUsers) || [];
+    for(var i=0; i < _usersList.length; i++){
+      var u = _usersList[i];
       if(String(u.username||'').trim() === username &&
          doLoginCompare(u.password, password) &&
          String(u.status||'ACTIVE').toUpperCase() === 'ACTIVE'){
@@ -20784,8 +20797,8 @@ window.doLogin = async function(){
 
     if(!matchedUser){
       // Check if username exists but password wrong
-      var userExists = APP.users.some(function(u){ return String(u.username||'').trim()===username; });
-      var lockedUser = APP.users.find(function(u){ return String(u.username||'').trim()===username && String(u.status||'').toUpperCase()==='LOCKED'; });
+      var userExists = _usersList.some(function(u){ return String(u.username||'').trim()===username; });
+      var lockedUser = _usersList.find(function(u){ return String(u.username||'').trim()===username && String(u.status||'').toUpperCase()==='LOCKED'; });
       if(lockedUser){
         if(errEl){ errEl.textContent='Account locked hai. Admin se rabita karo.'; errEl.style.display='block'; }
       } else if(userExists){
@@ -20798,7 +20811,7 @@ window.doLogin = async function(){
 
     // STEP 3: Set current user — guard against APP not ready
     var _appLogin = window.APP;
-    if(!_appLogin){ console.error('[Login] APP object not found!'); showError && showError('App not initialized. Page reload karo.'); return; }
+    if(!_appLogin){ showErr('App not initialized — page reload karo (F5).'); return; }
     if(typeof window.setCurrentUser === 'function'){
       _appLogin.currentUser = window.setCurrentUser(matchedUser);
     } else {
