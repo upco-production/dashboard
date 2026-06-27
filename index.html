@@ -10844,14 +10844,46 @@ debugLog('ok','Auto sync patch loaded','Dashboard will render immediately and re
         for(const t of prodTabs){ try{ prodRaw[t]=await readTab('PRODUCTION_MASTER',t,5); }catch(e2){ prodRaw[t]=[]; log('warn','fallback failed',t+': '+e2.message); } }
       }
       APP.inkData=(prodRaw.INK_MASTER||[]).map(normalizeInk);
-      const freshProdRows=['PRINTING_MASTER','LAMINATION_MASTER','SLITTING_MASTER','BAG_MAKING_MASTER'].flatMap(t=>(prodRaw[t]||[]).map(r=>productionNormalize(r,t))).filter(r=>r.job||r.sapSFG||r.production||r.productionPcs||r.PRODUCTION_PCS||r.waste||r.date);
-      if(typeof window.isMonthLocked==='function'&&typeof window.SDC!=='undefined'){
-        const frozen=window.SDC.load?window.SDC.load():[];
-        const freshMonths=[...new Set(freshProdRows.map(r=>r.month).filter(Boolean))];
-        const lockedFrozenRows=frozen.filter(r=>r.month&&window.isMonthLocked(r.month)&&!freshMonths.includes(r.month));
-        APP.productionData=lockedFrozenRows.concat(freshProdRows);
-        log('ok','Smart merge',`Locked frozen: ${lockedFrozenRows.length} | Fresh: ${freshProdRows.length}`);
-      } else { APP.productionData=freshProdRows; }
+      const _allFreshRows=['PRINTING_MASTER','LAMINATION_MASTER','SLITTING_MASTER','BAG_MAKING_MASTER'].flatMap(t=>(prodRaw[t]||[]).map(r=>productionNormalize(r,t))).filter(r=>r.job||r.sapSFG||r.production||r.productionPcs||r.PRODUCTION_PCS||r.waste||r.date);
+
+      // ── SMART DELTA MERGE ──────────────────────────────────────────────
+      // OPEN months  → use freshly fetched rows (Apps Script data)
+      // LOCKED months → use SDC frozen cache (never re-fetch — immutable)
+      //
+      // This means: Apps Script fetches everything but we only USE open month rows.
+      // Locked months come from local cache → faster + accurate.
+      if(typeof window.isMonthLocked==='function'){
+        // Split fresh rows: open months only (discard locked from fresh fetch)
+        const freshOpenRows = _allFreshRows.filter(r=>!window.isMonthLocked(r.month));
+        const freshOpenMonths = [...new Set(freshOpenRows.map(r=>r.month).filter(Boolean))];
+
+        // Get locked month rows from SDC frozen cache
+        let lockedCachedRows = [];
+        if(typeof window.SDC!=='undefined' && window.SDC.load){
+          const frozen = window.SDC.load();
+          // Only take rows from truly locked months (not open ones)
+          lockedCachedRows = frozen.filter(r=>r.month && window.isMonthLocked(r.month));
+        } else {
+          // SDC not loaded — fall back to locked rows from fresh fetch
+          lockedCachedRows = _allFreshRows.filter(r=>window.isMonthLocked(r.month));
+        }
+
+        APP.productionData = lockedCachedRows.concat(freshOpenRows);
+        log('ok','Smart merge',
+          `Open(fresh): ${freshOpenRows.length} rows [${freshOpenMonths.join(', ')}] | `+
+          `Locked(cache): ${lockedCachedRows.length} rows | `+
+          `Total: ${APP.productionData.length}`
+        );
+
+        // Save open month rows to SDC live cache for offline use
+        if(typeof window.SDC!=='undefined' && window.SDC.save){
+          setTimeout(()=>window.SDC.save(APP.productionData), 500);
+        }
+      } else {
+        // PPE not loaded yet — use all fresh rows (no period filtering)
+        APP.productionData = _allFreshRows;
+        log('ok','Production sync (no period filter)',`${APP.productionData.length} rows`);
+      }
       APP.ncrData=(prodRaw.QUALITY_MASTER||[]).map(normalizeQuality).filter(r=>r.ncr||r.qty||r.holdKg||r.customerComplaint);
       APP.dispatchData=(prodRaw.DISPATCH_MASTER||[]).map(r=>Object.assign({},r,{month:monthKeyFromDate(val(r,['DATE'],''))}));
       APP.fgData=(prodRaw.FG_MASTER||[]);
@@ -18801,14 +18833,15 @@ function sdcSave(allRows){
 }
 
 // ── Load: merge frozen + live → full dataset ──────────────────────────────
+// Returns ALL rows (locked frozen + open live) for full APP.productionData
+// Smart merge in syncLiveV4 then splits: open→fresh, locked→this cache
 function sdcLoad(){
   var frozen  = lsGet(SDC_FROZEN_KEY);
   var live    = lsGet(SDC_LIVE_KEY);
   var current = todayMonthKey();
+  var all     = [];
 
-  var all = [];
-
-  // Add all frozen months
+  // Add all frozen months (these include both locked and previously-open months)
   if(frozen && frozen.months){
     Object.keys(frozen.months).forEach(function(m){
       var rows = frozen.months[m] || [];
@@ -18816,25 +18849,23 @@ function sdcLoad(){
     });
   }
 
-  // Add live rows (current month)
+  // Add live (current month) rows
   if(live && live.rows && Array.isArray(live.rows)){
-    // If live month != today (month rolled over), treat as frozen
     if(live.month === current){
       all = all.concat(live.rows);
     } else if(live.month && live.rows.length > 0){
-      // Month rolled over — move to frozen automatically
+      // Month rolled over → move to frozen
       if(frozen && frozen.months && !frozen.months[live.month]){
         frozen.months[live.month] = live.rows;
         lsSet(SDC_FROZEN_KEY, frozen);
-        console.log('[SDC] Month rollover: ' + live.month + ' moved to frozen');
+        console.log('[SDC] Month rollover: ' + live.month + ' → frozen');
       }
-      // Live month is old, don't add (new Sync Now will fetch current)
     }
   }
 
-  console.log('[SDC] Loaded ' + all.length + ' total rows ('
-    + (frozen && frozen.meta ? frozen.meta.frozenMonths : 0) + ' frozen months + live '
-    + current + ')');
+  console.log('[SDC] Loaded ' + all.length + ' rows | '
+    + 'Frozen months: ' + (frozen && frozen.months ? Object.keys(frozen.months).length : 0)
+    + ' | Live: ' + current);
 
   return all;
 }
@@ -20538,6 +20569,734 @@ console.log('[PPE v2] Lock banner + ACM enforcement loaded');
 })();
 </script>
 <script>
+// ══════════════════════════════════════════════════════════════════════════════
+// UP ERP — MASTER LOGIN FIX v1.0
+// Injected at end of file — this runs LAST so it wins over all 15 prior
+// doLogin overrides. It replaces window.doLogin with a single clean async
+// function that:
+//   1. Loads PASSWORD_MASTER users if APP.users is empty
+//   2. Compares credentials correctly (plaintext — matches Apps Script v3.3
+//      which stores plaintext; if you switch to SHA-256 in Apps Script,
+//      uncomment the sha256() block below and update doLoginCompare)
+//   3. Awaits every async step before checking APP.currentUser
+//   4. Shows clear errors for each failure mode
+//   5. Calls all post-login hooks (sidebar, navigation, cache, etc.)
+// ══════════════════════════════════════════════════════════════════════════════
+(function(){
+
+// ── Tiny SHA-256 helper (needed if Apps Script stores hashed passwords) ──────
+// Currently unused (plaintext mode). Uncomment body of doLoginCompare below
+// if you switch Apps Script back to sha256 storage.
+function sha256hex(str){
+  // Uses SubtleCrypto — async. Wrap callers with await if enabling.
+  // Left as stub for now; plaintext compare is active.
+  return str;
+}
+
+// ── Password compare — PLAINTEXT mode (matches Apps Script v3.3 default) ────
+// To switch to hashed mode: replace body with:
+//   return storedHash === await sha256hex(inputPlain);
+function doLoginCompare(storedInSheet, inputFromUser){
+  return String(storedInSheet||'').trim() === String(inputFromUser||'').trim();
+}
+
+// ── Get Apps Script URL from any available source ────────────────────────────
+function getScriptUrl(){
+  try{ var ls = localStorage.getItem('up_appScriptUrl'); if(ls && ls.includes('script.google')) return ls; }catch(e){}
+  try{ if(window.APP && APP.settings && APP.settings.appScriptUrl && APP.settings.appScriptUrl.includes('script.google')) return APP.settings.appScriptUrl; }catch(e){}
+  try{ if(window.ERP_SHEET_CONFIG && ERP_SHEET_CONFIG.APP_SCRIPT_URL) return ERP_SHEET_CONFIG.APP_SCRIPT_URL; }catch(e){}
+  return '';
+}
+
+// ── Load PASSWORD_MASTER users from Apps Script ───────────────────────────────
+async function loadUsersForLogin(){
+  var url = getScriptUrl();
+  if(!url){
+    return { ok:false, error:'Apps Script URL configure nahi hai. Settings → App Script URL mein set karo.' };
+  }
+  try{
+    var sysSheetId = '1_wS3PPXn2YM8hlKQipPhrH1ere4s2wvda-1ETAG1fFM';
+    var endpoint = url + '?action=read&sheetId=' + sysSheetId + '&tab=PASSWORD_MASTER&headerRow=3';
+    var resp = await fetch(endpoint);
+    if(!resp.ok) return { ok:false, error:'Apps Script reachable nahi — HTTP ' + resp.status };
+    var data = await resp.json();
+    if(!data.ok) return { ok:false, error: 'Apps Script error: ' + (data.error||'unknown') };
+    var rows = data.rows || [];
+    if(!rows.length) return { ok:false, error:'PASSWORD_MASTER mein koi rows nahi mili. Tab name / headerRow check karo.' };
+
+    // Normalise rows into APP.users format
+    function normKey(k){ return String(k||'').trim().toUpperCase().replace(/\s+/g,'_').replace(/[^A-Z0-9_]/g,''); }
+    var users = rows.map(function(r){
+      var n = {};
+      Object.keys(r).forEach(function(k){ n[normKey(k)] = r[k]; });
+      var locked = String(n.ACCOUNT_LOCKED||'').toUpperCase() === 'YES' ||
+                   String(n.ACCOUNT_LOCKED||'').toUpperCase() === 'TRUE' ||
+                   String(n.ACCOUNT_LOCKED||'') === '1';
+      var status = locked ? 'LOCKED' : String(n.STATUS||'ACTIVE').trim().toUpperCase();
+      var perms   = String(n.PERMISSIONS||n.PERMISSION||'').toLowerCase();
+      return {
+        username   : String(n.USERNAME||n.USER||n.LOGIN_ID||'').trim(),
+        password   : String(n.PASSWORD||n.PASS||'').trim(),
+        role       : String(n.ROLE||'OPERATOR').trim(),
+        name       : String(n.PERSON_NAME||n.DISPLAY_NAME||n.NAME||n.USERNAME||'').trim(),
+        dept       : String(n.DEPARTMENT||n.DEPT||'ALL').trim(),
+        status     : status,
+        canEdit    : /edit|write|admin/.test(perms) || String(n.CAN_EDIT||'').toUpperCase()==='YES',
+        canImport  : /import|admin/.test(perms)     || String(n.CAN_IMPORT||'').toUpperCase()==='YES',
+        canExport  : /export|admin/.test(perms)     || String(n.CAN_EXPORT||'').toUpperCase()==='YES',
+        canDelete  : /delete|admin/.test(perms)     || String(n.CAN_DELETE||'').toUpperCase()==='YES',
+        permissions: {
+          canChangePassword: String(n.CAN_CHANGE_PASSWORD||'YES').toUpperCase() !== 'NO',
+          canApprove       : String(n.CAN_APPROVE||'').toUpperCase() === 'YES',
+          canReopenPosting : String(n.CAN_REOPEN_POSTING||'').toUpperCase() === 'YES'
+        }
+      };
+    }).filter(function(u){ return u.username && u.password; });
+
+    if(!users.length) return { ok:false, error:'PASSWORD_MASTER mein active users nahi hain (username/password empty).' };
+    window.APP.users = users;
+    return { ok:true, count:users.length };
+  }catch(err){
+    return { ok:false, error:'Network error: ' + err.message };
+  }
+}
+
+// ── Post-login UI update ──────────────────────────────────────────────────────
+function applyPostLoginUI(user){
+  try{
+    // Hide login page, show app
+    var lp = document.getElementById('login-page');
+    var ap = document.getElementById('app-container') || document.getElementById('main-app');
+    if(lp) lp.style.display = 'none';
+    if(ap) ap.style.display = '';
+
+    // Sidebar user info
+    var sbUser = document.getElementById('sidebar-username');
+    var sbRole = document.getElementById('sidebar-role');
+    if(sbUser) sbUser.textContent = user.name || user.username;
+    if(sbRole) sbRole.textContent = String(user.role||'').replace(/_/g,' ');
+
+    // Role badge
+    var rb = document.getElementById('user-role-badge');
+    var rbr = document.getElementById('user-badge-role');
+    if(rb){ rb.textContent = String(user.role||'').replace(/_/g,' '); rb.style.display=''; }
+    if(rbr) rbr.textContent = String(user.role||'').replace(/_/g,' ');
+
+    // Settings nav — only for MAIN_ADMIN
+    var sNav = document.getElementById('nav-settings-item');
+    if(sNav) sNav.style.display = (user.role === 'MAIN_ADMIN') ? '' : 'none';
+
+    // Save session to localStorage
+    try{
+      localStorage.setItem('up_current_user', JSON.stringify({
+        username:user.username, password:user.password, name:user.name,
+        role:user.role, dept:user.dept||'', status:user.status||'ACTIVE',
+        permissions:user.permissions||{}, _savedAt:Date.now()
+      }));
+    }catch(e){}
+
+    // Apply Scripts URL to APP.settings
+    var sUrl = getScriptUrl();
+    if(sUrl && window.APP) APP.settings.appScriptUrl = sUrl;
+
+  }catch(uiErr){
+    console.warn('[Login] Post-login UI error:', uiErr.message);
+  }
+}
+
+// ── THE MASTER doLogin ────────────────────────────────────────────────────────
+window.doLogin = async function(){
+  var uEl = document.getElementById('login-user');
+  var pEl = document.getElementById('login-pass');
+  var errEl = document.getElementById('login-error');
+  var btnEl = document.querySelector('.login-btn');
+
+  var username = uEl ? uEl.value.trim() : '';
+  var password = pEl ? pEl.value.trim() : '';
+
+  // Clear previous error
+  if(errEl){ errEl.style.display='none'; errEl.style.color='var(--red)'; errEl.textContent=''; }
+
+  if(!username || !password){
+    if(errEl){ errEl.textContent='Username aur password dono enter karo.'; errEl.style.display='block'; }
+    return;
+  }
+
+  // Disable button + show loading
+  if(btnEl){ btnEl.disabled=true; btnEl.textContent='Logging in...'; }
+
+  try{
+    // STEP 1: Make sure users are loaded
+    var usersReady = window.APP && Array.isArray(APP.users) &&
+      APP.users.some(function(u){ return u.username && u.password && u.status==='ACTIVE'; });
+
+    if(!usersReady){
+      if(errEl){ errEl.style.color='var(--yellow)'; errEl.textContent='Users load ho rahe hain PASSWORD_MASTER se...'; errEl.style.display='block'; }
+      var loadResult = await loadUsersForLogin();
+      if(!loadResult.ok){
+        if(errEl){ errEl.style.color='var(--red)'; errEl.textContent=loadResult.error; errEl.style.display='block'; }
+        return;
+      }
+      if(errEl){ errEl.style.display='none'; }
+    }
+
+    // STEP 2: Find matching user
+    var matchedUser = null;
+    for(var i=0; i < APP.users.length; i++){
+      var u = APP.users[i];
+      if(String(u.username||'').trim() === username &&
+         doLoginCompare(u.password, password) &&
+         String(u.status||'ACTIVE').toUpperCase() === 'ACTIVE'){
+        matchedUser = u;
+        break;
+      }
+    }
+
+    if(!matchedUser){
+      // Check if username exists but password wrong
+      var userExists = APP.users.some(function(u){ return String(u.username||'').trim()===username; });
+      var lockedUser = APP.users.find(function(u){ return String(u.username||'').trim()===username && String(u.status||'').toUpperCase()==='LOCKED'; });
+      if(lockedUser){
+        if(errEl){ errEl.textContent='Account locked hai. Admin se rabita karo.'; errEl.style.display='block'; }
+      } else if(userExists){
+        if(errEl){ errEl.textContent='Password galat hai.'; errEl.style.display='block'; }
+      } else {
+        if(errEl){ errEl.textContent='Username nahi mila PASSWORD_MASTER mein.'; errEl.style.display='block'; }
+      }
+      return;
+    }
+
+    // STEP 3: Set current user (use existing setCurrentUser if available)
+    if(typeof window.setCurrentUser === 'function'){
+      window.APP.currentUser = window.setCurrentUser(matchedUser);
+    } else {
+      window.APP.currentUser = matchedUser;
+    }
+
+    // STEP 4: Update UI
+    applyPostLoginUI(matchedUser);
+
+    // STEP 5: Navigate to dashboard
+    if(typeof window.navigate === 'function'){
+      setTimeout(function(){ window.navigate('dashboard'); }, 50);
+    }
+
+    // STEP 6: Post-login hooks — UPC cache, backup scheduler, etc.
+    setTimeout(function(){
+      try{ if(typeof window.upcStartPeriodicSave === 'function') window.upcStartPeriodicSave(); }catch(e){}
+      try{ if(window.APP && APP.currentUser && APP.currentUser.role==='MAIN_ADMIN' && typeof window.upcStartBackupScheduler==='function') window.upcStartBackupScheduler(); }catch(e){}
+      try{ if(typeof window.ppCheckUnlockNotif==='function') window.ppCheckUnlockNotif(); }catch(e){}
+      try{ if(typeof window.sofUpdateAgo==='function') window.sofUpdateAgo(); }catch(e){}
+      try{ if(typeof window.updateUserBadge==='function') window.updateUserBadge(); }catch(e){}
+    }, 200);
+
+    console.log('[Login] ✅ Login successful:', matchedUser.username, '|', matchedUser.role);
+
+  }catch(fatalErr){
+    console.error('[Login] Fatal error:', fatalErr);
+    if(errEl){ errEl.textContent='Login error: ' + fatalErr.message; errEl.style.display='block'; }
+  }finally{
+    if(btnEl){ btnEl.disabled=false; btnEl.textContent='Login'; }
+  }
+};
+
+console.log('[UP ERP Master Login Fix v1.0] Loaded — doLogin replaced with single clean async function');
+})();
+
+// ══════════════════════════════════════════════════════════════════════════════
+// UP ERP — MASTER SYNC & CONNECTION FIX v1.0
+// Runs LAST — replaces all 15+ syncAllSheets / testConnection overrides with
+// one clean, reliable implementation.
+//
+// Root causes fixed:
+//   1. syncAllSheets has 15+ wrappers; final wrapper may call a broken inner
+//      version that silently throws, so Sync Now shows ❌ but no real error
+//   2. testConnection uses different URL helpers in different wrappers;
+//      some call getSourceUrl() which requires ERP_SHEET_CONFIG, others use
+//      apiUrl() — if either is undefined the call silently fails
+//   3. "Test Sheet Connection / Load Users" button calls preLoginSyncDiagnostics
+//      which is also overridden 4 times — last version sometimes never resolves
+//   4. No visible error detail — user only sees ❌ button, no toast/log
+// ══════════════════════════════════════════════════════════════════════════════
+(function(){
+
+// ── Get Apps Script URL — check every possible storage location ──────────────
+function masterGetUrl(){
+  try{ var ls=localStorage.getItem('up_appScriptUrl'); if(ls&&ls.includes('script.google')) return ls.trim(); }catch(e){}
+  try{ if(window.APP&&APP.settings&&APP.settings.appScriptUrl&&APP.settings.appScriptUrl.includes('script.google')) return APP.settings.appScriptUrl.trim(); }catch(e){}
+  try{ if(window.ERP_SHEET_CONFIG&&ERP_SHEET_CONFIG.APP_SCRIPT_URL) return ERP_SHEET_CONFIG.APP_SCRIPT_URL.trim(); }catch(e){}
+  try{ if(window.UP_LIVE_V4&&UP_LIVE_V4.appScriptUrl) return UP_LIVE_V4.appScriptUrl.trim(); }catch(e){}
+  return '';
+}
+
+// ── Safe toast + debugLog ────────────────────────────────────────────────────
+function mToast(msg, type){
+  try{ if(typeof toast==='function') toast(msg, type||'info'); }catch(e){}
+  console.log('[UP Sync]', type||'info', msg);
+}
+function mLog(type, title, detail){
+  try{ if(typeof debugLog==='function') debugLog(type, title, detail||''); }catch(e){}
+  console[type==='err'?'error':type==='warn'?'warn':'log']('[UP Sync]', title, detail||'');
+}
+
+// ── Update connection badge in header ────────────────────────────────────────
+function setConnBadge(state, text){
+  try{
+    var c = document.getElementById('conn-debug');
+    if(!c) return;
+    c.className = 'conn-debug ' + (state||'warn');
+    var icon = c.querySelector('#conn-icon');
+    var txt  = c.querySelector('#conn-text');
+    if(icon) icon.textContent = '●';
+    if(txt)  txt.textContent  = text || state;
+  }catch(e){}
+}
+
+// ── Core fetch wrapper with timeout ─────────────────────────────────────────
+async function masterFetch(url, options, timeoutMs){
+  timeoutMs = timeoutMs || 30000;
+  var controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  var timer = controller ? setTimeout(function(){ controller.abort(); }, timeoutMs) : null;
+  try{
+    var opts = Object.assign({cache:'no-store'}, options||{});
+    if(controller) opts.signal = controller.signal;
+    var res = await fetch(url, opts);
+    if(!res.ok) throw new Error('HTTP ' + res.status + ' ' + res.statusText);
+    var text = await res.text();
+    try{ return JSON.parse(text); }
+    catch(e){ throw new Error('Apps Script ne JSON nahi diya: ' + text.slice(0,200)); }
+  }finally{
+    if(timer) clearTimeout(timer);
+  }
+}
+
+// ── Sheet IDs ────────────────────────────────────────────────────────────────
+var SHEET_IDS = {
+  SYSTEM_MASTER    : '1_wS3PPXn2YM8hlKQipPhrH1ere4s2wvda-1ETAG1fFM',
+  PRODUCTION_MASTER: '1v3ueUtYiuA5VNDmP3vsF5sH0fxyzIgZNfETGzt-eZ4s',
+  MATERIAL_MASTER  : '19RA6iOet114fRAbczD6m_o37gVbztOH4QYutWAaYo7o',
+  PLANNING_MASTER  : '10e6QTcE50kXcA__RHgCzGzzt5Gpyvb5I9c2Iojm2Yvg',
+  WIP_MASTER       : '142hTGmzg9CyeL-aQTzaF6JIy7WCRNvXHe6p4LPk_a6k'
+};
+
+// ── Build read URL ────────────────────────────────────────────────────────────
+function buildReadUrl(scriptUrl, sheetId, tab, headerRow){
+  return scriptUrl + '?action=read&sheetId=' + encodeURIComponent(sheetId) +
+         '&tab=' + encodeURIComponent(tab) +
+         '&headerRow=' + (headerRow||1) +
+         '&_=' + Date.now();
+}
+
+// ── Extract rows from any Apps Script response shape ──────────────────────────
+function extractRows(json, tabName){
+  if(!json) return [];
+  if(Array.isArray(json.rows))    return json.rows;
+  if(Array.isArray(json.data))    return json.data;
+  if(Array.isArray(json.records)) return json.records;
+  if(Array.isArray(json))         return json;
+  // Keyed object — try tab name or common keys
+  var keys = ['rows','data','records','result','values',tabName,
+               'PASSWORD_MASTER','USER_MASTER','ALL_MASTER_TABS'];
+  for(var i=0;i<keys.length;i++){
+    if(json[keys[i]] && Array.isArray(json[keys[i]])) return json[keys[i]];
+  }
+  return [];
+}
+
+// ── Normalise key ─────────────────────────────────────────────────────────────
+function nk(k){ return String(k||'').trim().toUpperCase().replace(/\s+/g,'_').replace(/[^A-Z0-9_]/g,''); }
+
+// ── Normalise user row from PASSWORD_MASTER ───────────────────────────────────
+function normalizeUserRow(r){
+  var n={};
+  Object.keys(r).forEach(function(k){ n[nk(k)]=r[k]; });
+  var locked = String(n.ACCOUNT_LOCKED||'').toUpperCase()==='YES'||
+               String(n.ACCOUNT_LOCKED||'').toUpperCase()==='TRUE'||
+               String(n.ACCOUNT_LOCKED||'')==='1';
+  var status = locked ? 'LOCKED' : String(n.STATUS||'ACTIVE').trim().toUpperCase();
+  var perms  = String(n.PERMISSIONS||n.PERMISSION||'').toLowerCase();
+  return {
+    username   : String(n.USERNAME||n.USER||n.LOGIN_ID||'').trim(),
+    password   : String(n.PASSWORD||n.PASS||'').trim(),
+    role       : String(n.ROLE||'OPERATOR').trim(),
+    name       : String(n.PERSON_NAME||n.DISPLAY_NAME||n.NAME||n.USERNAME||'').trim(),
+    dept       : String(n.DEPARTMENT||n.DEPT||'ALL').trim(),
+    status     : status,
+    canEdit    : /edit|write|admin/.test(perms)||String(n.CAN_EDIT||'').toUpperCase()==='YES',
+    canImport  : /import|admin/.test(perms)||String(n.CAN_IMPORT||'').toUpperCase()==='YES',
+    canExport  : /export|admin/.test(perms)||String(n.CAN_EXPORT||'').toUpperCase()==='YES',
+    canDelete  : /delete|admin/.test(perms)||String(n.CAN_DELETE||'').toUpperCase()==='YES',
+    permissions: {
+      canChangePassword: String(n.CAN_CHANGE_PASSWORD||'YES').toUpperCase()!=='NO',
+      canApprove       : String(n.CAN_APPROVE||'').toUpperCase()==='YES',
+      canReopenPosting : String(n.CAN_REOPEN_POSTING||'').toUpperCase()==='YES'
+    }
+  };
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MASTER testConnection
+// ══════════════════════════════════════════════════════════════════════════════
+window.testConnection = async function(){
+  var url = masterGetUrl();
+  if(!url){
+    mToast('Apps Script URL set nahi hai — Settings mein URL enter karo', 'error');
+    setConnBadge('err', 'No URL');
+    return false;
+  }
+  setConnBadge('warn', 'Testing...');
+  mToast('Connection test chal raha hai...', 'info');
+  try{
+    var pingUrl = url + '?action=ping&_=' + Date.now();
+    var data = await masterFetch(pingUrl, {}, 15000);
+    if(data && data.ok !== false){
+      setConnBadge('ok', 'Connected');
+      mToast('✅ Apps Script connected — v' + (data.version||'?'), 'success');
+      mLog('ok', 'Apps Script ping OK', JSON.stringify(data).slice(0,120));
+      return true;
+    } else {
+      throw new Error(data && data.error ? data.error : 'ok:false from Apps Script');
+    }
+  }catch(err){
+    setConnBadge('err', 'Failed');
+    var msg = err.message||String(err);
+    // Friendly error messages
+    if(msg.includes('abort')||msg.includes('timeout'))
+      msg = 'Timeout — Apps Script 15 seconds mein respond nahi kiya. Deploy check karo.';
+    else if(msg.includes('Failed to fetch')||msg.includes('NetworkError'))
+      msg = 'Network error — internet connection check karo ya Apps Script URL verify karo.';
+    else if(msg.includes('CORS')||msg.includes('cors'))
+      msg = 'CORS error — Apps Script "Anyone" access pe deploy hai? Phir se deploy karo.';
+    mToast('❌ Connection failed: ' + msg, 'error');
+    mLog('err', 'Apps Script ping FAILED', msg);
+    return false;
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MASTER preLoginSyncDiagnostics (Test Sheet Connection / Load Users button)
+// ══════════════════════════════════════════════════════════════════════════════
+window.preLoginSyncDiagnostics = async function(){
+  var errEl = document.getElementById('login-error');
+  function showMsg(msg, color){
+    if(errEl){ errEl.style.display='block'; errEl.style.color=color||'var(--text2)'; errEl.textContent=msg; }
+    console.log('[PreLogin]', msg);
+  }
+
+  var url = masterGetUrl();
+  if(!url){
+    showMsg('❌ Apps Script URL configure nahi hai. Pehle Settings → App Script URL mein set karo.', 'var(--red)');
+    return;
+  }
+
+  showMsg('🔄 Apps Script test ho raha hai...', 'var(--yellow)');
+
+  // Step 1: Ping
+  try{
+    var pingData = await masterFetch(url + '?action=ping&_=' + Date.now(), {}, 15000);
+    if(!pingData || pingData.ok === false) throw new Error(pingData&&pingData.error ? pingData.error : 'Ping failed');
+    showMsg('✅ Apps Script connected (v' + (pingData.version||'?') + '). Users load ho rahe hain...', 'var(--green)');
+  }catch(pingErr){
+    var pm = pingErr.message||String(pingErr);
+    if(pm.includes('abort')||pm.includes('timeout')) pm='Timeout — Apps Script respond nahi kiya (15s). Deployment check karo.';
+    else if(pm.includes('Failed to fetch')) pm='Network error — internet / URL check karo.';
+    showMsg('❌ Ping failed: ' + pm, 'var(--red)');
+    return;
+  }
+
+  // Step 2: Load users from PASSWORD_MASTER
+  try{
+    var readUrl = buildReadUrl(url, SHEET_IDS.SYSTEM_MASTER, 'PASSWORD_MASTER', 3);
+    var data = await masterFetch(readUrl, {}, 20000);
+    if(data && data.ok === false) throw new Error(data.error || 'Apps Script read failed');
+    var rows = extractRows(data, 'PASSWORD_MASTER');
+    if(!rows.length) throw new Error('PASSWORD_MASTER mein rows nahi mili. Tab name ya headerRow=3 check karo.');
+    var users = rows.map(normalizeUserRow).filter(function(u){ return u.username && u.password; });
+    if(!users.length) throw new Error('Rows mili (' + rows.length + ') lekin username/password empty — headers check karo: USERNAME, PASSWORD, ROLE, STATUS');
+    var active = users.filter(function(u){ return u.status==='ACTIVE'; });
+    window.APP.users = users; // load all, login filters by ACTIVE
+    showMsg('✅ ' + active.length + ' active user(s) loaded from PASSWORD_MASTER. Ab login karo.', 'var(--green)');
+    mLog('ok', 'PreLogin: users loaded', active.length + ' active of ' + users.length + ' total');
+  }catch(readErr){
+    showMsg('❌ PASSWORD_MASTER read failed: ' + (readErr.message||String(readErr)), 'var(--red)');
+    mLog('err', 'PreLogin: user load failed', readErr.message||String(readErr));
+  }
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MASTER syncAllSheets / syncNowClick
+// ══════════════════════════════════════════════════════════════════════════════
+var _masterSyncing = false;
+
+window.syncAllSheets = async function(options){
+  options = options || {};
+  if(_masterSyncing){
+    if(!options.silent) mToast('Sync already chal raha hai — wait karo', 'warn');
+    return false;
+  }
+  _masterSyncing = true;
+  var silent = !!options.silent;
+  var btn    = document.getElementById('sync-now-btn');
+
+  if(!silent) mToast('🔄 Sync shuru ho raha hai...', 'info');
+  setConnBadge('warn', 'Syncing...');
+
+  var url = masterGetUrl();
+  if(!url){
+    _masterSyncing = false;
+    mToast('❌ Apps Script URL set nahi — Settings mein configure karo', 'error');
+    setConnBadge('err', 'No URL');
+    return false;
+  }
+
+  var errors = [];
+
+  // ── STEP 1: System Master (users, machines, posting periods) ──────────────
+  try{
+    var pwdRows = extractRows(
+      await masterFetch(buildReadUrl(url, SHEET_IDS.SYSTEM_MASTER, 'PASSWORD_MASTER', 3), {}, 20000),
+      'PASSWORD_MASTER'
+    );
+    var users = pwdRows.map(normalizeUserRow).filter(function(u){ return u.username&&u.password; });
+    if(users.length) window.APP.users = users;
+    mLog('ok', 'SYSTEM_MASTER/PASSWORD_MASTER', users.length + ' user(s)');
+    try{ if(typeof setSourceStatus==='function') setSourceStatus('SYSTEM_MASTER','OK',users.length); }catch(e){}
+  }catch(e){
+    errors.push('PASSWORD_MASTER: ' + e.message);
+    mLog('warn', 'PASSWORD_MASTER failed', e.message);
+  }
+
+  // ── STEP 2: MACHINE_MASTER ────────────────────────────────────────────────
+  try{
+    var machRows = extractRows(
+      await masterFetch(buildReadUrl(url, SHEET_IDS.SYSTEM_MASTER, 'MACHINE_MASTER', 3), {}, 15000),
+      'MACHINE_MASTER'
+    );
+    if(machRows.length){
+      window.APP.machineMasterData = machRows;
+      mLog('ok', 'MACHINE_MASTER', machRows.length + ' row(s)');
+    }
+  }catch(e){ mLog('warn', 'MACHINE_MASTER skipped', e.message); }
+
+  // ── STEP 3: POSTING_PERIOD_MASTER ─────────────────────────────────────────
+  try{
+    var ppRows = extractRows(
+      await masterFetch(buildReadUrl(url, SHEET_IDS.SYSTEM_MASTER, 'POSTING_PERIOD_MASTER', 3), {}, 15000),
+      'POSTING_PERIOD_MASTER'
+    );
+    if(ppRows.length){
+      window.APP.postingPeriods = ppRows;
+      try{ if(typeof window.ppBuildIndex==='function') window.ppBuildIndex(ppRows); }catch(e){}
+      mLog('ok', 'POSTING_PERIOD_MASTER', ppRows.length + ' row(s)');
+    }
+  }catch(e){ mLog('warn', 'POSTING_PERIOD_MASTER skipped', e.message); }
+
+  // ── STEP 4: Production Master — try ALL_MASTER_TABS first ─────────────────
+  var prodTabs = ['INK_MASTER','PRINTING_MASTER','LAMINATION_MASTER',
+                  'SLITTING_MASTER','BAG_MAKING_MASTER','QUALITY_MASTER',
+                  'DISPATCH_MASTER','FG_MASTER'];
+  var prodRaw = {};
+  prodTabs.forEach(function(t){ prodRaw[t]=[]; });
+
+  var allTabsLoaded = false;
+  try{
+    var allUrl = buildReadUrl(url, SHEET_IDS.PRODUCTION_MASTER, 'ALL_MASTER_TABS', 5);
+    var allData = await masterFetch(allUrl, {}, 45000);
+    var allRows = extractRows(allData, 'ALL_MASTER_TABS');
+    if(allRows.length){
+      allTabsLoaded = true;
+      allRows.forEach(function(r){
+        var src = String(r.__SOURCE_TAB||r.SOURCE_TAB||r.TAB||'').toUpperCase().trim();
+        if(prodRaw[src]) prodRaw[src].push(r);
+      });
+      mLog('ok', 'PRODUCTION_MASTER/ALL_MASTER_TABS', allRows.length + ' total row(s)');
+    }
+  }catch(e){
+    mLog('warn', 'ALL_MASTER_TABS failed — trying individual tabs', e.message);
+  }
+
+  // Fallback: fetch individual tabs if ALL_MASTER_TABS failed
+  if(!allTabsLoaded){
+    for(var ti=0; ti<prodTabs.length; ti++){
+      var t = prodTabs[ti];
+      try{
+        var tabData = await masterFetch(buildReadUrl(url, SHEET_IDS.PRODUCTION_MASTER, t, 5), {}, 20000);
+        prodRaw[t] = extractRows(tabData, t);
+        mLog('ok', 'PRODUCTION_MASTER/' + t, prodRaw[t].length + ' row(s)');
+      }catch(e){
+        errors.push(t + ': ' + e.message);
+        mLog('warn', 'PRODUCTION_MASTER/' + t + ' failed', e.message);
+      }
+    }
+  }
+
+  // ── STEP 5: Assign production data to APP ─────────────────────────────────
+  try{
+    // Use V4 normalizers if available, else store raw
+    var normalize = (window.UP_LIVE_V4 && window.UP_LIVE_V4._productionNormalize) || function(r){ return r; };
+    var inkNorm   = (window.UP_LIVE_V4 && window.UP_LIVE_V4._normalizeInk)        || function(r){ return r; };
+
+    window.APP.inkData = (prodRaw.INK_MASTER||[]).map(inkNorm);
+
+    var allProdRows = ['PRINTING_MASTER','LAMINATION_MASTER','SLITTING_MASTER','BAG_MAKING_MASTER']
+      .reduce(function(acc, tab){
+        return acc.concat((prodRaw[tab]||[]).map(function(r){ return normalize(r,tab); }));
+      }, []);
+
+    if(allProdRows.length){
+      window.APP.productionData = allProdRows;
+      mLog('ok', 'Production data assigned', allProdRows.length + ' total rows');
+    } else if(errors.length === 0){
+      mLog('warn', 'Production data empty', 'All tabs returned 0 rows — check sheet data and Apps Script read');
+    }
+
+    // Quality / Dispatch / FG
+    if(prodRaw.QUALITY_MASTER&&prodRaw.QUALITY_MASTER.length)   window.APP.qualityData   = prodRaw.QUALITY_MASTER;
+    if(prodRaw.DISPATCH_MASTER&&prodRaw.DISPATCH_MASTER.length) window.APP.dispatchData  = prodRaw.DISPATCH_MASTER;
+    if(prodRaw.FG_MASTER&&prodRaw.FG_MASTER.length)             window.APP.fgData        = prodRaw.FG_MASTER;
+  }catch(assignErr){
+    errors.push('Data assign error: ' + assignErr.message);
+    mLog('err', 'Production data assign failed', assignErr.message);
+  }
+
+  // ── STEP 6: Material Master ───────────────────────────────────────────────
+  try{
+    var matRows = extractRows(
+      await masterFetch(buildReadUrl(url, SHEET_IDS.MATERIAL_MASTER, 'MATERIAL_MASTER', 4), {}, 20000),
+      'MATERIAL_MASTER'
+    );
+    if(matRows.length){ window.APP.materialData = matRows; mLog('ok','MATERIAL_MASTER',matRows.length+' row(s)'); }
+  }catch(e){ mLog('warn','MATERIAL_MASTER skipped',e.message); }
+
+  // ── STEP 7: Planning Master ───────────────────────────────────────────────
+  try{
+    var planRows = extractRows(
+      await masterFetch(buildReadUrl(url, SHEET_IDS.PLANNING_MASTER, 'PLANNING_ORDER_MASTER', 5), {}, 20000),
+      'PLANNING_ORDER_MASTER'
+    );
+    if(planRows.length){ window.APP.planningData = planRows; mLog('ok','PLANNING_ORDER_MASTER',planRows.length+' row(s)'); }
+  }catch(e){ mLog('warn','PLANNING_ORDER_MASTER skipped',e.message); }
+
+  // ── STEP 8: WIP Master ────────────────────────────────────────────────────
+  try{
+    var wipTabs = ['WIP_ORDER_LINK','CURRENT_WIP_DASHBOARD','WIP_MOVEMENT_LOG','STAGE_BALANCE'];
+    for(var wi=0;wi<wipTabs.length;wi++){
+      try{
+        var wipRows = extractRows(
+          await masterFetch(buildReadUrl(url, SHEET_IDS.WIP_MASTER, wipTabs[wi], 5), {}, 15000),
+          wipTabs[wi]
+        );
+        if(wipRows.length){
+          if(!window.APP.wipData) window.APP.wipData = {};
+          window.APP.wipData[wipTabs[wi]] = wipRows;
+          mLog('ok','WIP/'+wipTabs[wi],wipRows.length+' row(s)');
+        }
+      }catch(we){ mLog('warn','WIP/'+wipTabs[wi]+' skipped',we.message); }
+    }
+  }catch(e){ mLog('warn','WIP Master skipped',e.message); }
+
+  // ── DONE ─────────────────────────────────────────────────────────────────
+  _masterSyncing = false;
+
+  // Update sync timestamp
+  var nowISO = new Date().toISOString();
+  try{ if(typeof updateLastSyncIndicator==='function') updateLastSyncIndicator(nowISO); }catch(e){}
+  try{ if(typeof window.upcPostSync==='function') window.upcPostSync(); }catch(e){}
+
+  // Save to cache
+  try{ if(typeof window.upcSave==='function') window.upcSave('master-sync'); }catch(e){}
+  try{ if(typeof window.sdcSave==='function' && window.APP.productionData) window.sdcSave(window.APP.productionData); }catch(e){}
+
+  if(errors.length){
+    var errMsg = errors.slice(0,3).join(' | ') + (errors.length>3?' (+' + (errors.length-3) + ' more)':'');
+    if(!silent) mToast('⚠ Sync partial — kuch tabs failed: ' + errMsg, 'warn');
+    setConnBadge('warn', 'Partial');
+  } else {
+    if(!silent) mToast('✅ Sync complete! Sab data load ho gaya.', 'success');
+    setConnBadge('ok', 'Connected');
+  }
+
+  // Re-render current page
+  try{
+    var page = window.APP && (APP.currentPage||'dashboard');
+    if(typeof refreshCurrentPageAfterSync==='function') refreshCurrentPageAfterSync(page);
+    else if(typeof navigate==='function') navigate(page);
+  }catch(e){}
+
+  return true;
+};
+
+// ── syncNowClick — clean single implementation ────────────────────────────────
+window.syncNowClick = async function(){
+  var btn = document.getElementById('sync-now-btn');
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Syncing...'; }
+  try{
+    var ok = await window.syncAllSheets({silent:false});
+    if(btn) btn.textContent = ok===false ? '⚠ Partial' : '✅ Synced!';
+  }catch(e){
+    if(btn) btn.textContent = '❌ Failed';
+    mToast('❌ Sync error: ' + (e.message||String(e)), 'error');
+    mLog('err', 'syncNowClick fatal', e.message||String(e));
+    setConnBadge('err', 'Error');
+  }finally{
+    setTimeout(function(){
+      if(btn){ btn.disabled=false; btn.textContent='🔄 Sync Now'; }
+    }, 3000);
+  }
+};
+
+// ── showConnectionStatus — click conn badge ───────────────────────────────────
+window.showConnectionStatus = async function(){
+  var url = masterGetUrl();
+  var html = [
+    '<div style="font-size:13px">',
+    '<div style="margin-bottom:12px"><b>Apps Script URL:</b><br>',
+    '<code style="font-size:11px;word-break:break-all;color:var(--cyan)">'+(url||'Not configured')+'</code></div>',
+    '<div id="conn-status-result" style="padding:10px;border-radius:8px;background:var(--bg3);font-size:12px;color:var(--text2)">Testing...</div>',
+    '</div>'
+  ].join('');
+  try{
+    document.getElementById('modal-title').textContent = '🔌 Connection Status';
+    document.getElementById('modal-body').innerHTML = html;
+    document.getElementById('modal-footer').innerHTML =
+      '<button class="btn btn-outline" onclick="closeModal()">Close</button>' +
+      '<button class="btn btn-primary" onclick="syncNowClick();closeModal()">🔄 Sync Now</button>';
+    document.getElementById('modal-overlay').style.display = 'flex';
+  }catch(e){}
+
+  // Ping in background
+  try{
+    var res = document.getElementById('conn-status-result');
+    var ok = await window.testConnection();
+    if(res) res.innerHTML = ok
+      ? '<span style="color:var(--green)">✅ Connected — Apps Script responding normally</span>'
+      : '<span style="color:var(--red)">❌ Connection failed — check URL and deployment</span>';
+  }catch(e){
+    var res2 = document.getElementById('conn-status-result');
+    if(res2) res2.textContent = '❌ Error: ' + e.message;
+  }
+};
+
+// ── ensureSystemUsersLoaded — used by login ───────────────────────────────────
+window.ensureSystemUsersLoaded = async function(){
+  if(window.APP && Array.isArray(APP.users) &&
+     APP.users.some(function(u){ return u.username&&u.password&&u.status==='ACTIVE'; })) return true;
+  var url = masterGetUrl();
+  if(!url) return false;
+  try{
+    var data = await masterFetch(buildReadUrl(url, SHEET_IDS.SYSTEM_MASTER, 'PASSWORD_MASTER', 3), {}, 20000);
+    var rows = extractRows(data, 'PASSWORD_MASTER');
+    var users = rows.map(normalizeUserRow).filter(function(u){ return u.username&&u.password; });
+    if(users.length){ window.APP.users = users; return true; }
+    return false;
+  }catch(e){ mLog('err','ensureSystemUsersLoaded failed',e.message); return false; }
+};
+
+mLog('ok','Master Sync & Connection Fix v1.0 loaded',
+  'testConnection + syncAllSheets + syncNowClick + preLoginSyncDiagnostics replaced');
+
+})();
+
 // ── SILENT MODE — user can mute maintenance notifications ─────────────────
 var SILENT_KEY = 'up_notif_silent_v1';
 window.isNotifSilent = function(){
